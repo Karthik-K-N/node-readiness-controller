@@ -34,6 +34,8 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -367,10 +369,10 @@ func (r *ReadinessGateController) SetGlobalDryRun(dryRun bool) {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RuleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
-	ruleController, err := ctrl.NewControllerManagedBy(mgr).
-		For(&readinessv1alpha1.NodeReadinessGateRule{}).
-		Named("nodereadiness-controller").
-		Build(r)
+	c, err := controller.New("nodereadiness-controller", mgr, controller.Options{
+		Reconciler:              r,
+		MaxConcurrentReconciles: 1,
+	})
 	if err != nil {
 		return err
 	}
@@ -386,6 +388,7 @@ func (r *RuleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager)
 			}
 		}
 
+		log.Info("Rule changed, reprocessing applicable nodes", "rule", rule.Name)
 		nodeList := &corev1.NodeList{}
 		if err := r.List(context.Background(), nodeList, opts...); err != nil {
 			log.Error(err, "Failed to list nodes for rule", "rule", rule.Name)
@@ -401,9 +404,58 @@ func (r *RuleReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager)
 		return requests
 	}
 
-	ruleController.Watch(
+	err = c.Watch(
 		source.Kind(mgr.GetCache(), &readinessv1alpha1.NodeReadinessGateRule{},
 			handler.TypedEnqueueRequestsFromMapFunc[*readinessv1alpha1.NodeReadinessGateRule](mapFn),
 			predicate.TypedGenerationChangedPredicate[*readinessv1alpha1.NodeReadinessGateRule]{}))
+	if err != nil {
+		return err
+	}
+
+	// Watch for node additions and trigger reconciliation for all rules
+	mapNodeToRules := func(ctx context.Context, node *corev1.Node) []reconcile.Request {
+		log := ctrl.LoggerFrom(ctx)
+		ruleList := &readinessv1alpha1.NodeReadinessGateRuleList{}
+		if err := r.List(ctx, ruleList); err != nil {
+			log.Error(err, "Failed to list rules for node", "node", node.Name)
+			return nil
+		}
+
+		log.Info("Node changed, reprocessing all rules", "node", node.Name, "ruleCount", len(ruleList.Items))
+		requests := make([]reconcile.Request, len(ruleList.Items))
+		for i, rule := range ruleList.Items {
+			requests[i] = reconcile.Request{
+				NamespacedName: client.ObjectKey{Name: rule.Name},
+			}
+		}
+		return requests
+	}
+
+	nodePredicate := predicate.TypedFuncs[*corev1.Node]{
+		CreateFunc: func(e event.TypedCreateEvent[*corev1.Node]) bool {
+			log := ctrl.LoggerFrom(ctx)
+			log.Info("Processing node create event", "node", e.Object.Name)
+			return true
+		},
+		UpdateFunc: func(e event.TypedUpdateEvent[*corev1.Node]) bool {
+			log := ctrl.LoggerFrom(ctx)
+			log.Info("Processing node update event", "node", e.ObjectNew.Name)
+			return true
+		},
+		DeleteFunc: func(e event.TypedDeleteEvent[*corev1.Node]) bool {
+			log := ctrl.LoggerFrom(ctx)
+			log.Info("Processing node delete event", "node", e.Object.Name)
+			return false
+		},
+	}
+
+	err = c.Watch(
+		source.Kind(mgr.GetCache(), &corev1.Node{},
+			handler.TypedEnqueueRequestsFromMapFunc[*corev1.Node](mapNodeToRules),
+			nodePredicate))
+	if err != nil {
+		return err
+	}
+
 	return nil
 }

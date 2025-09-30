@@ -433,4 +433,64 @@ var _ = Describe("NodeReadinessGateRule Controller", func() {
 			}, time.Second*5).Should(ContainElement("node1"))
 		})
 	})
+
+	Context("when a new node is added", func() {
+		var rule *nodereadinessiov1alpha1.NodeReadinessGateRule
+		var newNode *corev1.Node
+
+		BeforeEach(func() {
+			rule = &nodereadinessiov1alpha1.NodeReadinessGateRule{
+				ObjectMeta: metav1.ObjectMeta{Name: "new-node-rule"},
+				Spec: nodereadinessiov1alpha1.NodeReadinessGateRuleSpec{
+					Conditions:      []nodereadinessiov1alpha1.ConditionRequirement{{Type: "TestReady", RequiredStatus: corev1.ConditionTrue}},
+					Taint:           nodereadinessiov1alpha1.TaintSpec{Key: "test-unready", Effect: corev1.TaintEffectNoSchedule},
+					EnforcementMode: nodereadinessiov1alpha1.EnforcementModeContinuous,
+					NodeSelector:    &metav1.LabelSelector{MatchLabels: map[string]string{"node-group": "new-workers"}},
+				},
+			}
+			newNode = &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "new-node",
+					Labels: map[string]string{"node-group": "new-workers"},
+				},
+				Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: "TestReady", Status: corev1.ConditionFalse}}},
+			}
+			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			Expect(k8sClient.Delete(ctx, rule)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, newNode)).To(Succeed())
+		})
+
+		It("should trigger reconciliation for existing rules", func() {
+			// Create the new node, which should trigger the watch
+			Expect(k8sClient.Create(ctx, newNode)).To(Succeed())
+
+			// Verify that the rule's status is updated to include the new node
+			Eventually(func() []string {
+				updatedRule := &nodereadinessiov1alpha1.NodeReadinessGateRule{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "new-node-rule"}, updatedRule)
+				if err != nil {
+					return nil
+				}
+				return updatedRule.Status.AppliedNodes
+			}, time.Second*10, time.Millisecond*250).Should(ContainElement("new-node"))
+
+			// Verify that the new node gets tainted
+			Eventually(func() bool {
+				updatedNode := &corev1.Node{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "new-node"}, updatedNode)
+				if err != nil {
+					return false
+				}
+				for _, taint := range updatedNode.Spec.Taints {
+					if taint.Key == rule.Spec.Taint.Key {
+						return true
+					}
+				}
+				return false
+			}, time.Second*10, time.Millisecond*250).Should(BeTrue())
+		})
+	})
 })
