@@ -1,0 +1,9 @@
+# Sample condition file to set a condition to a failed state.
+#
+# This can be used with the update-node-conditions.sh script
+# to test if the nrg-controller correctly re-applies taints.
+#
+type: "network.k8s.io/CalicoReady"
+status: "False"
+reason: "CalicoCNINotReady"
+message: "Calico CNI is not ready on the node"
