@@ -186,6 +186,8 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 // cleanupDeletedNodes removes status entries for nodes that no longer exist
 func (r *ReadinessGateController) cleanupDeletedNodes(ctx context.Context, rule *readinessv1alpha1.NodeReadinessGateRule) error {
+	log := ctrl.LoggerFrom(ctx)
+
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList); err != nil {
 		return err
@@ -196,6 +198,7 @@ func (r *ReadinessGateController) cleanupDeletedNodes(ctx context.Context, rule 
 		existingNodes[node.Name] = true
 	}
 
+	// Filter out deleted nodes
 	var newNodeEvaluations []readinessv1alpha1.NodeEvaluation
 	for _, evaluation := range rule.Status.NodeEvaluations {
 		if existingNodes[evaluation.NodeName] {
@@ -203,8 +206,37 @@ func (r *ReadinessGateController) cleanupDeletedNodes(ctx context.Context, rule 
 		}
 	}
 
-	rule.Status.NodeEvaluations = newNodeEvaluations
-	return r.Status().Update(ctx, rule)
+	if len(newNodeEvaluations) == len(rule.Status.NodeEvaluations) {
+		log.V(4).Info("No deleted nodes to clean up", "rule", rule.Name)
+		return nil
+	}
+
+	log.V(4).Info("Cleaning up deleted nodes from rule status",
+		"rule", rule.Name,
+		"before", len(rule.Status.NodeEvaluations),
+		"after", len(newNodeEvaluations))
+
+	// Use retry on conflict to update status to avoid race conditions from node updates
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &readinessv1alpha1.NodeReadinessGateRule{}
+		if err := r.Get(ctx, client.ObjectKey{Name: rule.Name}, fresh); err != nil {
+			return err
+		}
+
+		var freshNodeEvaluations []readinessv1alpha1.NodeEvaluation
+		for _, evaluation := range fresh.Status.NodeEvaluations {
+			if existingNodes[evaluation.NodeName] {
+				freshNodeEvaluations = append(freshNodeEvaluations, evaluation)
+			}
+		}
+
+		if len(freshNodeEvaluations) == len(fresh.Status.NodeEvaluations) {
+			return nil
+		}
+
+		fresh.Status.NodeEvaluations = freshNodeEvaluations
+		return r.Status().Update(ctx, fresh)
+	})
 }
 
 // processAllNodesForRule processes all nodes when a rule changes
@@ -383,8 +415,12 @@ func (r *ReadinessGateController) updateRuleCache(ctx context.Context, rule *rea
 	r.ruleCacheMutex.Lock()
 	defer r.ruleCacheMutex.Unlock()
 
-	r.ruleCache[rule.Name] = rule.DeepCopy()
-	log.Info("Added rule to cache", "rule", rule.Name, "totalRules", len(r.ruleCache))
+	ruleCopy := rule.DeepCopy()
+	r.ruleCache[rule.Name] = ruleCopy
+	log.V(4).Info("Updated rule cache",
+		"rule", rule.Name,
+		"totalRules", len(r.ruleCache),
+		"resourceVersion", ruleCopy.ResourceVersion)
 }
 
 // getCachedRule retrieves a rule from cache
