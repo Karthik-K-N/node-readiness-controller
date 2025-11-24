@@ -1,5 +1,7 @@
 # Node Readiness Controller
 
+<img style="float: right; margin: auto;"  width="180px" src="./logo/node-readiness-controller-logo.svg"/>
+
 A Kubernetes controller that provides fine-grained, declarative readiness for nodes. It ensures nodes only accept workloads when all required components eg: network agents, GPU drivers,
 storage drivers or custom health-checks, are fully ready on the node.
 
