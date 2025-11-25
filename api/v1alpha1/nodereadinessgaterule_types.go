@@ -106,7 +106,7 @@ type DryRunResults struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Cluster,shortName=nrgr
 
 // NodeReadinessGateRule is the Schema for the nodereadinessgaterules API
 type NodeReadinessGateRule struct {
