@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -26,7 +27,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -40,11 +40,9 @@ const (
 var _ = Describe("NodeReadinessRule Controller", func() {
 	var (
 		ctx                 context.Context
-		readinessController *ReadinessGateController
+		readinessController *ReadinessController
 		ruleReconciler      *RuleReconciler
-		nodeReconciler      *NodeReconciler
 		scheme              *runtime.Scheme
-		fakeClientset       *fake.Clientset
 	)
 
 	BeforeEach(func() {
@@ -53,21 +51,13 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 		Expect(nodereadinessiov1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
 
-		fakeClientset = fake.NewSimpleClientset()
-		readinessController = &ReadinessGateController{
+		readinessController = &ReadinessController{
 			Client:    k8sClient,
 			Scheme:    scheme,
-			clientset: fakeClientset,
 			ruleCache: make(map[string]*nodereadinessiov1alpha1.NodeReadinessRule),
 		}
 
 		ruleReconciler = &RuleReconciler{
-			Client:     k8sClient,
-			Scheme:     scheme,
-			Controller: readinessController,
-		}
-
-		nodeReconciler = &NodeReconciler{
 			Client:     k8sClient,
 			Scheme:     scheme,
 			Controller: readinessController,
@@ -93,6 +83,20 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			}
 
 			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
+
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: rule.Name},
+			}
+			result, err := ruleReconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+
+			Eventually(func() error {
+				updatedRule := &nodereadinessiov1alpha1.NodeReadinessRule{}
+				Expect(k8sClient.Get(ctx, req.NamespacedName, updatedRule)).To(Succeed())
+				Expect(updatedRule.GetFinalizers()).To(ContainElement(finalizerName))
+				return nil
+			}).Should(Succeed())
 
 			Eventually(func() error {
 				_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{
@@ -196,8 +200,22 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, rule) }()
 
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: rule.Name},
+			}
+			result, err := ruleReconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+
+			Eventually(func() error {
+				updatedRule := &nodereadinessiov1alpha1.NodeReadinessRule{}
+				Expect(k8sClient.Get(ctx, req.NamespacedName, updatedRule)).To(Succeed())
+				Expect(updatedRule.GetFinalizers()).To(ContainElement(finalizerName))
+				return nil
+			}).Should(Succeed())
+
 			// Trigger reconciliation manually to simulate CREATE event handling
-			_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{
+			_, err = ruleReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "immediate-test-rule"},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -248,7 +266,21 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 
 			Expect(k8sClient.Create(ctx, rule)).To(Succeed())
 
-			_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{
+			req := ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: rule.Name},
+			}
+			result, err := ruleReconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+
+			Eventually(func() error {
+				updatedRule := &nodereadinessiov1alpha1.NodeReadinessRule{}
+				Expect(k8sClient.Get(ctx, req.NamespacedName, updatedRule)).To(Succeed())
+				Expect(updatedRule.GetFinalizers()).To(ContainElement(finalizerName))
+				return nil
+			}).Should(Succeed())
+
+			_, err = ruleReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "dry-run-rule"},
 			})
 			Expect(err).NotTo(HaveOccurred())
@@ -326,7 +358,7 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			readinessController.updateRuleCache(ctx, rule)
 
 			// Process node
-			_, err := nodeReconciler.Reconcile(ctx, reconcile.Request{
+			_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "test-node"},
 			})
 			Expect(err).NotTo(HaveOccurred())

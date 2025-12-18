@@ -31,7 +31,7 @@ graph TB
     %% Controller Components
     RuleRec --> Cache[Rule Cache]
     NodeRec[NodeReconciler] --> Cache
-    Cache --> Controller[ReadinessGateController]
+    Cache --> Controller[ReadinessController]
 
     %% Node Processing
     Nodes[Kubernetes Nodes] --> NodeRec
@@ -75,7 +75,7 @@ graph TB
 - Supports bootstrap-only and continuous enforcement modes
 - Allows node selector targeting and grace periods
 
-#### 2. ReadinessGateController
+#### 2. ReadinessController
 - **RuleReconciler**: Processes rule changes and updates internal cache
 - **NodeReconciler**: Handles node condition changes and evaluates applicable rules
 - Manages taint addition/removal based on condition satisfaction

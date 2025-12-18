@@ -9,7 +9,7 @@ This project implements a Kubernetes controller that manages node taints based o
 ### Core Components
 
 1. **NodeReadinessRule CRD**: Defines rules mapping multiple node conditions to a single taint
-2. **ReadinessGateController**: Main controller that processes rules and manages node taints  
+2. **ReadinessController**: Main controller that processes rules and manages node taints  
 3. **NPD Integration**: Works with Node Problem Detector for condition monitoring
 4. **Validation Webhook**: Prevents conflicting rule configurations
 

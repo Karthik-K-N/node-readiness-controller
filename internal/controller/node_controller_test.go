@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nodereadinessiov1alpha1 "sigs.k8s.io/node-readiness-controller/api/v1alpha1"
@@ -101,9 +100,8 @@ var _ = Describe("Node Controller", func() {
 	Context("when reconciling a node", func() {
 		var (
 			ctx                 context.Context
-			readinessController *ReadinessGateController
-			nodeReconciler      *NodeReconciler
-			fakeClientset       *fake.Clientset
+			readinessController *ReadinessController
+			ruleReconciler      *RuleReconciler
 			node                *corev1.Node
 			rule                *nodereadinessiov1alpha1.NodeReadinessRule
 			namespacedName      types.NamespacedName
@@ -112,20 +110,19 @@ var _ = Describe("Node Controller", func() {
 		BeforeEach(func() {
 			ctx = context.Background()
 
-			fakeClientset = fake.NewSimpleClientset()
-			readinessController = &ReadinessGateController{
+			readinessController = &ReadinessController{
 				Client:    k8sClient,
 				Scheme:    k8sClient.Scheme(),
-				clientset: fakeClientset,
 				ruleCache: make(map[string]*nodereadinessiov1alpha1.NodeReadinessRule),
 			}
 
-			nodeReconciler = &NodeReconciler{
+			namespacedName = types.NamespacedName{Name: nodeName}
+
+			ruleReconciler = &RuleReconciler{
 				Client:     k8sClient,
 				Scheme:     k8sClient.Scheme(),
 				Controller: readinessController,
 			}
-			namespacedName = types.NamespacedName{Name: nodeName}
 
 			node = &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
@@ -206,7 +203,7 @@ var _ = Describe("Node Controller", func() {
 				Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 
 				// Reconcile
-				_, err := nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+				_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
 				// Verify taint is removed
@@ -233,7 +230,7 @@ var _ = Describe("Node Controller", func() {
 				// Step 1: Meet conditions and remove taint
 				node.Status.Conditions[0].Status = corev1.ConditionTrue
 				Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
-				_, err := nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+				_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 				Expect(err).NotTo(HaveOccurred())
 				Eventually(func() bool {
 					updatedNode := &corev1.Node{}
@@ -253,7 +250,7 @@ var _ = Describe("Node Controller", func() {
 				Expect(k8sClient.Status().Update(ctx, updatedNode)).To(Succeed())
 
 				// Reconcile again
-				_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+				_, err = ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
 				// Verify taint is NOT re-added
@@ -279,7 +276,7 @@ var _ = Describe("Node Controller", func() {
 				node.Status.Conditions[0].Status = corev1.ConditionTrue
 				Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 
-				_, err := nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+				_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
 				Eventually(func() bool {
@@ -298,7 +295,7 @@ var _ = Describe("Node Controller", func() {
 				// Step 1: Meet conditions and remove taint
 				node.Status.Conditions[0].Status = corev1.ConditionTrue
 				Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
-				_, err := nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+				_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 				Expect(err).NotTo(HaveOccurred())
 				Eventually(func() bool {
 					updatedNode := &corev1.Node{}
@@ -318,7 +315,7 @@ var _ = Describe("Node Controller", func() {
 				Expect(k8sClient.Status().Update(ctx, updatedNode)).To(Succeed())
 
 				// Reconcile again
-				_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+				_, err = ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
 				// Verify taint IS re-added
@@ -344,7 +341,7 @@ var _ = Describe("Node Controller", func() {
 				node.Status.Conditions[0].Status = corev1.ConditionTrue
 				Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 
-				_, err := nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
+				_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: namespacedName})
 				Expect(err).NotTo(HaveOccurred())
 
 				Consistently(func() []corev1.Taint {

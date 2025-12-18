@@ -28,7 +28,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
-	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -60,6 +59,7 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var enableWebhook bool
+
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -95,24 +95,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create Kubernetes clientset for direct API access
-	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
-	if err != nil {
-		setupLog.Error(err, "unable to create kubernetes clientset")
-		os.Exit(1)
-	}
-
-	// Create the main ReadinessGateController
-	readinessController := controller.NewReadinessGateController(mgr, clientset)
+	// Create the main ReadinessController
+	readinessController := controller.NewReadinessGateController(mgr)
 
 	// Create reconcilers linked to the main controller
 	ruleReconciler := &controller.RuleReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Controller: readinessController,
-	}
-
-	nodeReconciler := &controller.NodeReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		Controller: readinessController,
@@ -122,10 +109,6 @@ func main() {
 	ctx := ctrl.SetupSignalHandler()
 	if err := ruleReconciler.SetupWithManager(ctx, mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NodeReadinessRule")
-		os.Exit(1)
-	}
-	if err := nodeReconciler.SetupWithManager(ctx, mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Node")
 		os.Exit(1)
 	}
 
