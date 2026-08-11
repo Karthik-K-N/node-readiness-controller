@@ -125,8 +125,15 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
+	// Build the label selector once so all downstream callers (dry-run, cleanup,
+	// deletion) share the same filtered list.
+	selector, err := metav1.LabelSelectorAsSelector(&rule.Spec.NodeSelector)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("invalid nodeSelector on rule %s: %w", rule.Name, err)
+	}
+
 	nodeList := &corev1.NodeList{}
-	if err := r.List(ctx, nodeList); err != nil {
+	if err := r.List(ctx, nodeList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -138,25 +145,22 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	// Update rule cache (after cleanup)
 	r.Controller.updateRuleCache(ctx, rule)
 
-	// Handle dry run
+	// Handle dry run: simulate the evaluation inline because dry-run never
+	// mutates nodes and its results belong on the rule status, not on a node.
 	if rule.Spec.DryRun {
 		if err := r.Controller.processDryRun(ctx, rule, nodeList); err != nil {
 			log.Error(err, "Failed to process dry run", "rule", rule.Name)
 			return ctrl.Result{RequeueAfter: time.Minute}, err
 		}
 	} else {
-		// Clear previous dry run results
+		// Not a dry-run: the node fan-out via NodeReconciler handles all taint
+		// mutations. The rule reconciler only needs to advance ObservedGeneration
+		// and clear any stale dry-run results so the status stays consistent.
+		rule.Status.ObservedGeneration = rule.Generation
 		rule.Status.DryRunResults = readinessv1alpha1.DryRunResults{}
-
-		// Process all applicable nodes for this rule
-		if err := r.Controller.processAllNodesForRule(ctx, rule, nodeList); err != nil {
-			log.Error(err, "Failed to process nodes for rule", "rule", rule.Name)
-			return ctrl.Result{RequeueAfter: time.Minute}, err
-		}
 	}
 
-	// Update rule status
-	if err := r.Controller.updateRuleStatus(ctx, rule); err != nil {
+	if err := r.Controller.updateRuleObservedStatus(ctx, rule); err != nil {
 		log.Error(err, "Failed to update rule status", "rule", rule.Name)
 		return ctrl.Result{RequeueAfter: time.Minute}, err
 	}
@@ -557,14 +561,11 @@ func (r *RuleReadinessController) removeRuleFromCache(ctx context.Context, ruleN
 	log.Info("Removed rule from cache", "rule", ruleName, "totalRules", len(r.ruleCache))
 }
 
-// updateRuleStatus updates the status of a NodeReadinessRule.
-func (r *RuleReadinessController) updateRuleStatus(ctx context.Context, rule *readinessv1alpha1.NodeReadinessRule) error {
+// updateRuleObservedStatus persists only the rule-level fields that the rule
+// reconciler owns: ObservedGeneration and DryRunResults.
+func (r *RuleReadinessController) updateRuleObservedStatus(ctx context.Context, rule *readinessv1alpha1.NodeReadinessRule) error {
 	log := ctrl.LoggerFrom(ctx)
-
-	log.V(1).Info("Updating rule status",
-		"rule", rule.Name,
-		"nodeEvaluations", len(rule.Status.NodeEvaluations),
-		"appliedNodes", len(rule.Status.AppliedNodes))
+	log.V(1).Info("Updating rule observed status", "rule", rule.Name, "observedGeneration", rule.Status.ObservedGeneration)
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latestRule := &readinessv1alpha1.NodeReadinessRule{}
@@ -573,21 +574,15 @@ func (r *RuleReadinessController) updateRuleStatus(ctx context.Context, rule *re
 		}
 
 		patch := client.MergeFrom(latestRule.DeepCopy())
-
-		latestRule.Status.NodeEvaluations = rule.Status.NodeEvaluations
-		latestRule.Status.AppliedNodes = rule.Status.AppliedNodes
-		latestRule.Status.FailedNodes = rule.Status.FailedNodes
 		latestRule.Status.ObservedGeneration = rule.Status.ObservedGeneration
 		latestRule.Status.DryRunResults = rule.Status.DryRunResults
 
 		if err := r.Status().Patch(ctx, latestRule, patch); err != nil {
-			log.V(1).Info("Status patch conflict, will retry",
-				"rule", rule.Name,
-				"error", err.Error())
+			log.V(1).Info("Status patch conflict, will retry", "rule", rule.Name, "error", err.Error())
 			return err
 		}
 
-		log.V(1).Info("Successfully patched rule status", "rule", rule.Name)
+		log.V(1).Info("Successfully patched rule observed status", "rule", rule.Name)
 		return nil
 	})
 }
@@ -600,10 +595,6 @@ func (r *RuleReadinessController) processDryRun(ctx context.Context, rule *readi
 	var summaryParts []string
 
 	for _, node := range nodeList.Items {
-		if !r.ruleAppliesTo(ctx, rule, &node) {
-			continue
-		}
-
 		affectedNodes++
 
 		// Simulate rule evaluation
@@ -672,10 +663,6 @@ func (r *RuleReadinessController) cleanupTaintsForRule(ctx context.Context, rule
 
 	var errors []string
 	for _, node := range nodeList.Items {
-		if !r.ruleAppliesTo(ctx, rule, &node) {
-			continue
-		}
-
 		// Check if node has the taint managed by this rule
 		if r.hasTaintBySpec(&node, rule.Spec.Taint) {
 			log.Info("Removing taint from node during rule cleanup",

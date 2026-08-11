@@ -289,6 +289,12 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
+			// Rule reconciler updated the cache; now NodeReconciler owns taint work.
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "immediate-test-node"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
 			// Verify the node gets tainted immediately due to unmet condition
 			Eventually(func() bool {
 				updatedNode := &corev1.Node{}
@@ -925,6 +931,12 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 				})
 				Expect(err).NotTo(HaveOccurred())
 
+				// Rule reconciler updated the cache; NodeReconciler removes the taint.
+				_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: nodeName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+
 				// The pre-existing taint should be removed because the absent condition
 				// is satisfied via defaultStatus:False.
 				Eventually(func() bool {
@@ -1356,6 +1368,10 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "db-rule"}})
 			Expect(err).NotTo(HaveOccurred())
 
+			// Rule reconciler updated the cache; NodeReconciler owns taint work.
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "node1"}})
+			Expect(err).NotTo(HaveOccurred())
+
 			// Verify that the taint has been added to the node
 			Eventually(func() bool {
 				updatedNode := &corev1.Node{}
@@ -1492,6 +1508,12 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			// Manually trigger rule reconciliation to simulate watch behavior
 			_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "new-node-rule"},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Rule reconciler updated the cache; NodeReconciler owns taint work.
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "new-node"},
 			})
 			Expect(err).NotTo(HaveOccurred())
 
@@ -1658,8 +1680,14 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 		})
 
 		It("should remove the node from the rule's status", func() {
-			// Initial reconcile to populate status
+			// Initial reconcile to populate cache, then drive node reconciles to
+			// seed NodeEvaluations for both nodes.
 			_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "delete-node-rule"}})
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "node1"}})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "node2"}})
 			Expect(err).NotTo(HaveOccurred())
 
 			Eventually(func() int {
@@ -2083,6 +2111,12 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
+			// Rule reconciler updated the cache; drive NodeReconciler for matching nodes.
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "applied-node-1"}})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "applied-node-2"}})
+			Expect(err).NotTo(HaveOccurred())
+
 			By("Verifying AppliedNodes contains only matching nodes")
 			Eventually(func() []string {
 				updatedRule := &nodereadinessiov1alpha1.NodeReadinessRule{}
@@ -2100,6 +2134,12 @@ var _ = Describe("NodeReadinessRule Controller", func() {
 			_, err := ruleReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: "applied-nodes-rule"},
 			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Rule reconciler updated the cache; drive NodeReconciler for matching nodes.
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "applied-node-1"}})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = nodeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: "applied-node-2"}})
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Verifying NodeEvaluations exist for all AppliedNodes")

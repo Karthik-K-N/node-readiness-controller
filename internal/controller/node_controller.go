@@ -31,7 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	readinessv1alpha1 "sigs.k8s.io/node-readiness-controller/api/v1alpha1"
 	"sigs.k8s.io/node-readiness-controller/internal/metrics"
@@ -46,6 +48,12 @@ type NodeReconciler struct {
 }
 
 // SetupWithManager sets up the controller with the Manager.
+//
+// The node controller serves as the sole writer for taint mutations. It is
+// triggered by two event sources:
+//
+//  1. Node changes (conditions / taints / labels).
+//  2. NodeReadinessRule changes.
 func (r *NodeReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	concurrency := max(r.MaxConcurrentReconciles, 1)
 	return ctrl.NewControllerManagedBy(mgr).
@@ -84,7 +92,49 @@ func (r *NodeReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager)
 				return shouldReconcile
 			},
 		})).
+		Watches(
+			&readinessv1alpha1.NodeReadinessRule{},
+			handler.EnqueueRequestsFromMapFunc(r.ruleToNodeRequests),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
 		Complete(r)
+}
+
+// ruleToNodeRequests maps a NodeReadinessRule event to reconcile requests for
+// every Node that matches the rule's nodeSelector.
+func (r *NodeReconciler) ruleToNodeRequests(ctx context.Context, obj client.Object) []reconcile.Request {
+	log := ctrl.LoggerFrom(ctx)
+
+	rule, ok := obj.(*readinessv1alpha1.NodeReadinessRule)
+	if !ok {
+		return nil
+	}
+
+	if !rule.DeletionTimestamp.IsZero() {
+		return nil
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(&rule.Spec.NodeSelector)
+	if err != nil {
+		log.Error(err, "invalid nodeSelector on rule, skipping node fan-out", "rule", rule.Name)
+		return nil
+	}
+
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList, client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		log.Error(err, "failed to list matching nodes for rule fan-out", "rule", rule.Name)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, len(nodeList.Items))
+	for i, node := range nodeList.Items {
+		requests[i] = reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: node.Name},
+		}
+	}
+
+	log.V(4).Info("Enqueuing node reconciles for rule change", "rule", rule.Name, "matchingNodes", len(requests))
+	return requests
 }
 
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch;update;patch
@@ -152,12 +202,13 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 			"rule", rule.Name,
 			"ruleResourceVersion", rule.ResourceVersion)
 
-		if err := r.evaluateRuleForNode(ctx, rule, node); err != nil {
-			log.Error(err, "Failed to evaluate rule for node",
+		evalErr := r.evaluateRuleForNode(ctx, rule, node)
+		if evalErr != nil {
+			log.Error(evalErr, "Failed to evaluate rule for node",
 				"node", node.Name, "rule", rule.Name)
 			// Continue with other rules even if one fails
-			r.recordNodeFailure(rule, node.Name, "EvaluationError", err.Error())
-			errs = append(errs, err)
+			r.recordNodeFailure(rule, node.Name, "EvaluationError", evalErr.Error())
+			errs = append(errs, evalErr)
 			metrics.Failures.WithLabelValues(rule.Name, "EvaluationError").Inc()
 		}
 
@@ -167,9 +218,11 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 			"rule", rule.Name,
 			"resourceVersion", rule.ResourceVersion)
 
+		evalSucceeded := evalErr == nil
+
 		var successfullyPatchedRule *readinessv1alpha1.NodeReadinessRule
 
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		patchErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latestRule := &readinessv1alpha1.NodeReadinessRule{}
 			if err := r.Get(ctx, client.ObjectKey{Name: rule.Name}, latestRule); err != nil {
 				return err
@@ -201,6 +254,24 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 				)
 			}
 
+			// Maintain AppliedNodes: add the node on success, remove on failure.
+			var newApplied []string
+			alreadyPresent := false
+			for _, n := range latestRule.Status.AppliedNodes {
+				if n == node.Name {
+					alreadyPresent = true
+					if evalSucceeded {
+						newApplied = append(newApplied, n)
+					}
+				} else {
+					newApplied = append(newApplied, n)
+				}
+			}
+			if evalSucceeded && !alreadyPresent {
+				newApplied = append(newApplied, node.Name)
+			}
+			latestRule.Status.AppliedNodes = newApplied
+
 			// handle status.FailedNodes for this node
 			var updatedFailedNodes []readinessv1alpha1.NodeFailure
 			for _, failure := range latestRule.Status.FailedNodes {
@@ -223,13 +294,13 @@ func (r *RuleReadinessController) processNodeAgainstAllRules(ctx context.Context
 			return nil
 		})
 
-		if err != nil {
-			log.Error(err, "Failed to update rule status after node evaluation",
+		if patchErr != nil {
+			log.Error(patchErr, "Failed to update rule status after node evaluation",
 				"node", node.Name,
 				"rule", rule.Name,
 				"resourceVersion", rule.ResourceVersion)
 			// continue with other rules
-			errs = append(errs, err)
+			errs = append(errs, patchErr)
 		} else {
 			log.V(4).Info("Successfully persisted rule status from node reconciler",
 				"node", node.Name,
