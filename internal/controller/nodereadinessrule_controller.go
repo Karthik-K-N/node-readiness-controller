@@ -55,6 +55,7 @@ type RuleReadinessController struct {
 	clientset              kubernetes.Interface
 	EventRecorder          events.EventRecorder
 	EnableNodeStateMetrics bool
+	EnableNRE              bool
 
 	// Cache for efficient rule lookup
 	ruleCacheMutex sync.RWMutex
@@ -70,13 +71,14 @@ type RuleReconciler struct {
 }
 
 // NewRuleReadinessController creates a new controller.
-func NewRuleReadinessController(mgr ctrl.Manager, clientset kubernetes.Interface, enableNodeStateMetrics bool) *RuleReadinessController {
+func NewRuleReadinessController(mgr ctrl.Manager, clientset kubernetes.Interface, enableNodeStateMetrics bool, enableNRE bool) *RuleReadinessController {
 	return &RuleReadinessController{
 		Client:                 mgr.GetClient(),
 		Scheme:                 mgr.GetScheme(),
 		clientset:              clientset,
 		EventRecorder:          mgr.GetEventRecorder("node-readiness-controller"),
 		EnableNodeStateMetrics: enableNodeStateMetrics,
+		EnableNRE:              enableNRE,
 		ruleCache:              make(map[string]*readinessv1alpha1.NodeReadinessRule),
 	}
 }
@@ -284,10 +286,11 @@ func (r *RuleReadinessController) processAllNodesForRule(ctx context.Context, ru
 	log.Info("Processing all nodes for rule", "rule", rule.Name, "totalNodes", len(nodeList.Items))
 
 	var appliedNodes []string
-	for _, node := range nodeList.Items {
-		if r.ruleAppliesTo(ctx, rule, &node) {
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
+		if r.ruleAppliesTo(ctx, rule, node) {
 			log.Info("Processing node for rule", "rule", rule.Name, "node", node.Name)
-			if err := r.evaluateRuleForNode(ctx, rule, &node); err != nil {
+			if err := r.evaluateRuleForNode(ctx, rule, node); err != nil {
 				log.Error(err, "Failed to evaluate node for rule", "rule", rule.Name, "node", node.Name)
 				r.recordNodeFailure(rule, node.Name, "EvaluationError", err.Error())
 				metrics.Failures.WithLabelValues(rule.Name, "EvaluationError").Inc()
@@ -300,6 +303,9 @@ func (r *RuleReadinessController) processAllNodesForRule(ctx context.Context, ru
 					}
 				}
 				rule.Status.FailedNodes = updatedFailedNodes
+			}
+			if r.EnableNRE {
+				r.updateNREForNode(ctx, node)
 			}
 		}
 	}
